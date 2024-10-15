@@ -103,17 +103,15 @@ class ORTInferenceSessionWrapper:
         # Run the inference
         self._session.run_with_iobinding(self._io_binding)
 
-        outputs: list[np.ndarray] = self._io_binding.copy_outputs_to_cpu()
-        if len(outputs) == 1:
-            np_tensor: np.ndarray = outputs[0]
-            if np_tensor.dtype == np.float16:
-                numpy_tensor = np_tensor.astype(np.float32)
-            return torch.from_numpy(numpy_tensor)
-        return {
-            name: torch.from_numpy(
-                np_tensor.astype(np.float32)
-                if np_tensor.dtype == np.float16
-                else np_tensor
+        outputs: list[torch.Tensor] = list(
+            map(
+                lambda tensor: torch.from_numpy(
+                    tensor if tensor.dtype != np.float16 else tensor.astype(np.float32)
+                ),
+                self._io_binding.copy_outputs_to_cpu(),
             )
-            for name, np_tensor in zip(self._output_names, outputs)
-        }
+        )
+        if len(outputs) == 1:
+            return outputs[0]
+        else:
+            return {name: tensor for name, tensor in zip(self._output_names, outputs)}
