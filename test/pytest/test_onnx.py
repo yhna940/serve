@@ -52,9 +52,18 @@ def test_model_packaging_and_start():
     )
 
 
+def test_model_packaging_with_base_handler_and_start():
+    subprocess.run("mkdir model_store", shell=True)
+    subprocess.run(
+        "torch-model-archiver -f --model-name onnx-with-base-handler --version 1.0 --serialized-file linear.onnx --export-path model_store",
+        shell=True,
+        check=True,
+    )
+
+
 def test_model_start():
     subprocess.run(
-        "torchserve --start --ncs --model-store model_store --models onnx.mar",
+        "torchserve --start --ncs --model-store model_store --models onnx.mar onnx-with-base-handler.mar",
         shell=True,
         check=True,
     )
@@ -63,6 +72,22 @@ def test_model_start():
 def test_inference():
     subprocess.run(
         "curl -X POST http://127.0.0.1:8080/predictions/onnx --data-binary '1'",
+        shell=True,
+    )
+
+
+def test_inference_with_base_handler():
+    subprocess.run(
+        "curl -X POST http://127.0.0.1:8080/predictions/onnx-with-base-handler --data-binary '1'",
+        shell=True,
+    )
+
+
+def test_inference_with_dictionary_input():
+    subprocess.run(
+        "curl -X POST http://127.0.0.1:8080/predictions/onnx-with-base-handler "
+        "-H 'Content-Type: application/json' "
+        "--data-binary '{\"modelInput\": 1}'",
         shell=True,
     )
 
