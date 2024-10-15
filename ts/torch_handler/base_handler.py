@@ -8,6 +8,10 @@ import importlib.util
 import logging
 import os
 import time
+import types
+import re
+from typing import Any
+import numpy as np
 
 import packaging.version
 import torch
@@ -98,6 +102,7 @@ except ImportError:
     logger.warning("Torch TensorRT not enabled")
 
 
+
 def setup_ort_session(model_pt_path, map_location):
     providers = (
         ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -113,7 +118,65 @@ def setup_ort_session(model_pt_path, map_location):
         model_pt_path, providers=providers, sess_options=sess_options
     )
 
-    return ort_session
+    class _ORTInferenceSessionWrapper:
+        def __init__(self, session: ort.InferenceSession): 
+            self._session: ort.InferenceSession = session
+            self._io_binding: = self._session.io_binding()
+            self._input_metas = {
+                input.name: input for input in self._session.get_inputs()
+            }
+            self._input_names = [input.name for input in self._session.get_inputs()]
+            self._output_names = self._session.get_outputs()
+
+        def __getattr__(self, attr: str) -> Any:
+            return getattr(self.session, attr)
+        
+        def _parse_cuda_device_id(self, device: str) -> int:
+            match_result = re.match('([^:]+)(:[0-9]+)?$', device)
+            if match_result is None:
+                raise ValueError("Cannot parse device string: " + device)
+            if match_result.group(1).lower() != 'cuda':
+                raise ValueError("Not a cuda device: " + device)
+            return 0 if match_result.lastindex == 1 else int(match_result.group(2)[1:])
+        
+        def __call__(self, data: torch.Tensor | dict[str, torch.Tensor], *args, **kwargs) -> torch.Tensor | dict[str, torch.Tensor]:
+            if isinstance(data, torch.Tensor):
+                if len(self._input_names) > 1:
+                    raise ValueError
+                data = {
+                    self._input_names[0].name: data
+                }
+            for name, tensor in data.items():
+                input_type: str = self._input_metas[name].type
+                if "float16" in input_type:
+                    tensor = tensor.to(torch.float16)
+                tensor = tensor.contiguous()
+                element_type = tensor.new_zeros(
+                    1, device='cpu').numpy().dtype
+                self._io_binding.bind_input(
+                    name=name,
+                    device_type=tensor.device.type,
+                    device_id=-1 if tensor.device.type == 'cpu' else self._parse_cuda_device_id(tensor.device.index),
+                    element_type=element_type,
+                    bufer_ptr=tensor.data_ptr(),
+                )
+
+            for name in self._output_names:
+                self._io_binding.bind_output(name)
+
+            if map_location == "cuda":
+                torch.cuda.synchronize()
+
+            self._session.run_with_iobinding(self._io_binding)
+            outputs = self._io_binding.copy_outputs_to_cpu()
+            if len(outputs) == 1:
+                np_tensor: np.ndarray = outputs[0]
+                if np_tensor.dtype == np.float16:
+                    numpy_tensor = np_tensor.astype(np.float32)
+                return torch.from_numpy(numpy_tensor)
+            return {name: torch.from_numpy(numpy_tensor.astype(np.float32) if numpy_tensor.dtype == np.float16 else numpy_tensor) for name, np_tensor in zip(self._output_names, outputs)}
+
+    return _ORTInferenceSessionWrapper(ort_session)
 
 
 class BaseHandler(abc.ABC):
